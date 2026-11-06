@@ -2,12 +2,9 @@ package dev.seon.expanddisplay
 
 import android.util.Log
 import android.view.Surface
-import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -20,6 +17,7 @@ import kotlin.concurrent.thread
  */
 class StreamClient(
     val host: HostInfo,
+    private val openLink: () -> Link,
     private val deviceName: String,
     private val densityDpi: Int,
     private val callbacks: Callbacks,
@@ -31,7 +29,7 @@ class StreamClient(
         fun onFirstFrame()
     }
 
-    private var socket: Socket? = null
+    @Volatile private var link: Link? = null
     @Volatile private var output: DataOutputStream? = null
     private val writer = Executors.newSingleThreadExecutor { r -> Thread(r, "stream-writer").apply { priority = Thread.MAX_PRIORITY } }
     private val closed = AtomicBoolean(false)
@@ -52,18 +50,16 @@ class StreamClient(
         thread(name = "stream-reader", priority = Thread.MAX_PRIORITY) {
             var error: String? = null
             try {
-                val s = Socket()
-                s.tcpNoDelay = true
-                s.receiveBufferSize = 1 shl 20
-                s.trafficClass = 0xB8 // DSCP EF: hint low-latency on Wi-Fi (WMM voice/video)
-                s.connect(InetSocketAddress(host.address, host.port), 4000)
-                s.keepAlive = true
-                socket = s
-                output = DataOutputStream(BufferedOutputStream(s.getOutputStream(), 16 * 1024))
-                if (closed.get()) return@thread
+                val l = openLink()
+                link = l
+                output = DataOutputStream(BufferedOutputStream(l.output, 16 * 1024))
+                if (closed.get()) {
+                    l.close()
+                    return@thread
+                }
                 callbacks.onConnected()
                 synchronized(lock) { if (viewW > 0) sendConfigLocked() }
-                readLoop(DataInputStream(BufferedInputStream(s.getInputStream(), 256 * 1024)))
+                readLoop(DataInputStream(l.input))
             } catch (e: Exception) {
                 if (!closed.get()) {
                     error = e.message ?: e.javaClass.simpleName
@@ -82,7 +78,7 @@ class StreamClient(
 
     private fun shutdown() {
         if (!closed.compareAndSet(false, true)) return
-        runCatching { socket?.close() }
+        link?.close()
         writer.shutdownNow()
         synchronized(lock) {
             decoder?.release()

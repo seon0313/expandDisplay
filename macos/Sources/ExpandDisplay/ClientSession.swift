@@ -1,9 +1,9 @@
 import Foundation
 import Network
 
-/// One connected Android device. Network I/O runs on `queue`; callbacks are delivered on main.
+/// One connected Android device (Wi-Fi or USB). I/O runs on `queue`; callbacks are delivered on main.
 final class ClientSession {
-    let connection: NWConnection
+    let transport: Transport
     let queue = DispatchQueue(label: "expanddisplay.session", qos: .userInteractive)
 
     var onConfig: ((_ width: Int, _ height: Int, _ dpi: Int, _ name: String) -> Void)?
@@ -14,32 +14,25 @@ final class ClientSession {
     private var buffer: [UInt8] = []
     private var closed = false
 
-    var peerDescription: String {
-        if case let .hostPort(host, _) = connection.endpoint { return "\(host)" }
-        return "\(connection.endpoint)"
-    }
+    var peerDescription: String { "\(transport.displayName) · \(transport.kind)" }
+    var isUSB: Bool { transport is USBTransport }
 
-    init(connection: NWConnection) {
-        self.connection = connection
+    init(transport: Transport) {
+        self.transport = transport
     }
 
     func start() {
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready: self?.receive()
-            case .failed, .cancelled: self?.handleClose()
-            default: break
-            }
-        }
-        connection.start(queue: queue)
+        transport.start(queue: queue, onReceive: { [weak self] data in
+            guard let self else { return }
+            self.buffer.append(contentsOf: data)
+            self.parse()
+        }, onClose: { [weak self] in
+            self?.handleClose()
+        })
     }
 
     func close() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.closed = true
-            self.connection.cancel()
-        }
+        queue.async { self.handleClose() }
     }
 
     // MARK: Sending (any thread)
@@ -49,7 +42,7 @@ final class ClientSession {
         packet.append(type)
         packet.appendBE(UInt32(payload.count))
         packet.append(payload)
-        connection.send(content: packet, completion: .contentProcessed { _ in completion?() })
+        transport.send(packet) { completion?() }
     }
 
     func sendVideoConfig(width: Int, height: Int) {
@@ -64,21 +57,6 @@ final class ClientSession {
     }
 
     // MARK: Receiving
-
-    private func receive() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            if let data, !data.isEmpty {
-                self.buffer.append(contentsOf: data)
-                self.parse()
-            }
-            if isComplete || error != nil {
-                self.handleClose()
-                return
-            }
-            self.receive()
-        }
-    }
 
     private func parse() {
         var start = 0
@@ -115,7 +93,7 @@ final class ClientSession {
     private func handleClose() {
         if !closed {
             closed = true
-            connection.cancel()
+            transport.cancel()
         }
         notifyClosedOnce()
     }

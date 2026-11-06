@@ -23,7 +23,8 @@ struct MenuContentView: View {
             Text("ExpandDisplay").font(.headline)
 
             VStack(alignment: .leading, spacing: 4) {
-                Label(c.serverStatus, systemImage: "antenna.radiowaves.left.and.right")
+                Label(c.serverStatus, systemImage: "wifi")
+                Label(c.usbStatus, systemImage: "cable.connector")
                 if let name = c.clientName {
                     Label("연결됨: \(name)", systemImage: "iphone")
                 } else {
@@ -44,6 +45,7 @@ struct MenuContentView: View {
 
             Divider()
 
+            Toggle("USB 케이블 연결 사용", isOn: $c.usbEnabled)
             Toggle("HiDPI (Retina) 모드", isOn: $c.hiDPI)
             Picker("비트레이트", selection: $c.bitrateMbps) {
                 ForEach([10, 20, 30, 50, 80], id: \.self) { Text("\($0) Mbps").tag($0) }

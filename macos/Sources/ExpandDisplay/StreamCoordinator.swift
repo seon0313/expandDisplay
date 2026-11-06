@@ -16,6 +16,10 @@ final class StreamCoordinator: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var hasScreenPermission = CGPreflightScreenCaptureAccess()
     @Published private(set) var hasAccessibilityPermission = AXIsProcessTrusted()
+    @Published private(set) var usbStatus = "USB: 시작 중…"
+    @Published var usbEnabled: Bool = UserDefaults.standard.object(forKey: "usbEnabled") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(usbEnabled, forKey: "usbEnabled"); usb.enabled = usbEnabled }
+    }
 
     @Published var hiDPI: Bool = UserDefaults.standard.object(forKey: "hiDPI") as? Bool ?? true {
         didSet { UserDefaults.standard.set(hiDPI, forKey: "hiDPI"); if oldValue != hiDPI { rebuild() } }
@@ -32,6 +36,10 @@ final class StreamCoordinator: ObservableObject {
     }
 
     private let server = Server()
+    private let usb = EDAccessoryManager()
+    /// Connections that haven't sent CONFIG yet. A connection becomes the active session when it
+    /// does, so a USB link waiting for the phone app doesn't kick out a working Wi-Fi session.
+    private var pending: [ClientSession] = []
     private let input = InputInjector()
     private var session: ClientSession?
     private var pipeline: CapturePipeline?
@@ -44,7 +52,11 @@ final class StreamCoordinator: ObservableObject {
     private var restartWork: DispatchWorkItem?
 
     init() {
-        server.onConnection = { [weak self] conn in self?.accept(conn) }
+        server.onConnection = { [weak self] conn in self?.accept(TCPTransport(conn)) }
+        usb.enabled = usbEnabled
+        usb.onAccessory = { [weak self] conn in self?.accept(USBTransport(conn)) }
+        usb.onStatus = { [weak self] s in self?.usbStatus = s }
+        usb.start()
         server.onStateChange = { [weak self] s in self?.serverStatus = s }
         server.start()
         permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -125,20 +137,11 @@ final class StreamCoordinator: ObservableObject {
         session?.close()
     }
 
-    private func accept(_ conn: NWConnection) {
-        // Only one phone at a time: the newest connection wins.
-        if let old = session {
-            old.onClose = nil
-            old.close()
-        }
-        stopPipeline()
-        teardown?.cancel()
-        teardown = nil
-        lastError = nil
-
-        let s = ClientSession(connection: conn)
+    private func accept(_ transport: Transport) {
+        let s = ClientSession(transport: transport)
         s.onConfig = { [weak self, weak s] w, h, dpi, name in
-            guard let self, let s, s === self.session else { return }
+            guard let self, let s else { return }
+            if s !== self.session { self.promote(s) }
             self.handleConfig(width: w, height: h, dpi: dpi, name: name)
         }
         s.onTouch = { [weak self, weak s] action, x, y in
@@ -153,19 +156,36 @@ final class StreamCoordinator: ObservableObject {
             self.pipeline?.requestKeyframe()
         }
         s.onClose = { [weak self, weak s] in
-            guard let self, let s, s === self.session else { return }
+            guard let self, let s else { return }
+            self.pending.removeAll { $0 === s }
+            if s.isUSB { self.usbStatus = "USB: 케이블 대기 중" }
+            guard s === self.session else { return }
             self.session = nil
             self.clientName = nil
             self.stopPipeline()
             self.scheduleTeardown()
         }
-        session = s
-        clientName = s.peerDescription
+        pending.append(s)
         s.start()
     }
 
+    /// Make `s` the active phone (only one at a time; the newest one to send CONFIG wins).
+    private func promote(_ s: ClientSession) {
+        pending.removeAll { $0 === s }
+        if let old = session {
+            old.onClose = nil
+            old.close()
+        }
+        stopPipeline()
+        teardown?.cancel()
+        teardown = nil
+        lastError = nil
+        session = s
+        if s.isUSB { usbStatus = "USB: 스트리밍" }
+    }
+
     private func handleConfig(width: Int, height: Int, dpi: Int, name: String) {
-        clientName = name
+        clientName = "\(name) · \(session?.transport.kind ?? "")"
         let w = max(320, width) & ~1
         let h = max(240, height) & ~1
         if let r = request, r.width == w, r.height == h, r.dpi == dpi, pipeline != nil {

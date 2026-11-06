@@ -30,12 +30,24 @@ class MainActivity : ComponentActivity() {
 
         controller = AppController(applicationContext)
         controller.start()
+        controller.handleIntent(intent)
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 AppScreen(controller)
             }
         }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        controller.handleIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        controller.checkUsb()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

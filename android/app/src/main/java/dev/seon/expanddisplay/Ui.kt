@@ -102,6 +102,7 @@ fun StreamScreen(controller: AppController) {
 fun ConnectScreen(controller: AppController, state: ConnState) {
     val hosts by controller.discovery.hosts.collectAsState()
     val auto by controller.autoConnect.collectAsState()
+    val usb by controller.usbAttached.collectAsState()
     var manualIp by rememberSaveable { mutableStateOf("") }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -112,7 +113,7 @@ fun ConnectScreen(controller: AppController, state: ConnState) {
             ) {
                 Text("ExpandDisplay", style = MaterialTheme.typography.headlineMedium)
                 Text(
-                    "Mac에서 ExpandDisplay를 실행하고, 폰과 Mac을 같은 Wi-Fi(또는 폰 핫스팟)에 연결하세요.",
+                    "Mac에서 ExpandDisplay를 실행하고 USB-C 케이블로 연결하거나, 같은 Wi-Fi(또는 폰 핫스팟)에 연결하세요.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -127,6 +128,15 @@ fun ConnectScreen(controller: AppController, state: ConnState) {
                         Text("⚠ $it", color = MaterialTheme.colorScheme.error)
                     }
                     else -> {}
+                }
+
+                if (usb) {
+                    Card(onClick = { controller.reconnectUsb() }, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text("🔌 USB 케이블로 연결", style = MaterialTheme.typography.titleMedium)
+                            Text("Mac이 케이블로 연결되어 있습니다", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {

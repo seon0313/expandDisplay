@@ -10,7 +10,7 @@ let package = Package(
             path: "Sources/VirtualDisplayBridge",
             publicHeadersPath: "include",
             cSettings: [.unsafeFlags(["-fobjc-arc"])],
-            linkerSettings: [.linkedFramework("CoreGraphics"), .linkedFramework("Foundation")]
+            linkerSettings: [.linkedFramework("CoreGraphics"), .linkedFramework("Foundation"), .linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]
         ),
         .executableTarget(
             name: "ExpandDisplay",
