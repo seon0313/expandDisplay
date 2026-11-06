@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>ExpandDisplay</string>
+	<key>CFBundleDisplayName</key>
+	<string>ExpandDisplay</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.seon.expanddisplay</string>
+	<key>CFBundleExecutable</key>
+	<string>ExpandDisplay</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__BUILD__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Android 기기가 이 Mac을 찾아 외장 디스플레이로 연결하기 위해 로컬 네트워크를 사용합니다.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_expanddisplay._tcp</string>
+	</array>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>가상 디스플레이의 화면을 Android 기기로 전송합니다.</string>
+</dict>
+</plist>
