@@ -64,6 +64,14 @@ struct MenuContentView: View {
             }
             if c.hasScreenPermission && c.hasAccessibilityPermission {
                 Label("권한 OK", systemImage: "checkmark.seal").foregroundStyle(.secondary).font(.caption)
+            } else {
+                Text("이미 허용했는데도 계속 요청하면 → 이전 버전의 권한 기록이 남아 있는 것입니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("앱 재시작") { c.relaunch() }
+                    Button("권한 초기화 후 재시작") { c.resetPermissionsAndRelaunch() }
+                }
             }
 
             HStack {

@@ -4,6 +4,7 @@ import Combine
 import CoreGraphics
 import Foundation
 import Network
+import ScreenCaptureKit
 import VirtualDisplayBridge
 
 /// Owns the server, the virtual display, the active client and the capture pipeline. Main thread only.
@@ -61,11 +62,50 @@ final class StreamCoordinator: ObservableObject {
 
     // MARK: Permissions
 
+    private var lastProbe = Date.distantPast
+
     func refreshPermissions() {
-        let screen = CGPreflightScreenCaptureAccess()
         let ax = AXIsProcessTrusted()
-        if screen != hasScreenPermission { hasScreenPermission = screen }
         if ax != hasAccessibilityPermission { hasAccessibilityPermission = ax }
+
+        // CGPreflightScreenCaptureAccess() is cached for the life of the process, so after the user
+        // grants access it keeps saying "no" until relaunch. Probe ScreenCaptureKit for the truth.
+        if CGPreflightScreenCaptureAccess() {
+            if !hasScreenPermission { hasScreenPermission = true }
+            return
+        }
+        guard Date().timeIntervalSince(lastProbe) > 5 else { return }
+        lastProbe = Date()
+        Task {
+            let ok = (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)) != nil
+            await MainActor.run {
+                if ok != self.hasScreenPermission { self.hasScreenPermission = ok }
+            }
+        }
+    }
+
+    /// Relaunch the app (permission changes are only fully picked up by a fresh process).
+    func relaunch() {
+        let path = Bundle.main.bundlePath
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$0\"", path]
+        try? task.run()
+        NSApp.terminate(nil)
+    }
+
+    /// Wipe stale TCC entries (left over from older builds with a different signature) and relaunch.
+    /// After relaunch macOS asks again and the fresh grant sticks to this build.
+    func resetPermissionsAndRelaunch() {
+        let id = Bundle.main.bundleIdentifier ?? "dev.seon.expanddisplay"
+        for service in ["ScreenCapture", "Accessibility"] {
+            let t = Process()
+            t.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            t.arguments = ["reset", service, id]
+            try? t.run()
+            t.waitUntilExit()
+        }
+        relaunch()
     }
 
     func requestScreenPermission() {
@@ -143,13 +183,9 @@ final class StreamCoordinator: ObservableObject {
         guard let req = request, let session else { return }
         stopPipeline()
 
+        // Don't gate on CGPreflightScreenCaptureAccess() (stale cache) — ScreenCaptureKit will
+        // report a real permission failure when the pipeline starts.
         refreshPermissions()
-        guard hasScreenPermission else {
-            lastError = "화면 기록 권한이 필요합니다"
-            session.sendStatus("Mac에서 '화면 기록' 권한을 허용한 뒤 앱을 다시 실행해 주세요")
-            CGRequestScreenCaptureAccess()
-            return
-        }
 
         var modeChanged = false
         guard ensureDisplay(for: req, modeChanged: &modeChanged) != nil else {
@@ -200,7 +236,9 @@ final class StreamCoordinator: ObservableObject {
                     await MainActor.run {
                         if p === self.pipeline {
                             self.lastError = error.localizedDescription
-                            self.session?.sendStatus("Mac 오류: \(error.localizedDescription)")
+                            self.refreshPermissions()
+                            let hint = self.hasScreenPermission ? "" : " — Mac 메뉴바에서 '권한 초기화 후 재시작'을 눌러 주세요"
+                            self.session?.sendStatus("Mac 오류: \(error.localizedDescription)\(hint)")
                         }
                     }
                 }

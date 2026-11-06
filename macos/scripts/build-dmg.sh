@@ -19,8 +19,17 @@ if [ -f Resources/AppIcon.icns ]; then
   /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist"
 fi
 
-# Ad-hoc signature (no Apple Developer ID available in CI).
-codesign --force --deep --sign - "$APP"
+# Signing. A plain ad-hoc signature's designated requirement is the binary's hash, so every
+# new build looks like a different app to macOS privacy (TCC) and Screen Recording /
+# Accessibility grants stop applying. Pin the requirement to the bundle identifier instead so
+# grants survive updates. Set SIGN_IDENTITY to use a real certificate.
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP"
+else
+  codesign --force --deep --sign - \
+    --requirements '=designated => identifier "dev.seon.expanddisplay"' "$APP"
+fi
+codesign -d -r- "$APP" || true
 codesign --verify --verbose "$APP"
 
 mkdir -p build/dmg
