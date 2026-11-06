@@ -26,6 +26,20 @@ The Android app sends its **full-screen window size in pixels** when it connects
 - `TCP_NODELAY` on both sides, DSCP EF traffic class
 - Bitrate (10–80 Mbps) and frame rate (30/60/120) can be changed from the Mac menu bar.
 
+## Touch input (TouchLink v1)
+Touch is sent with a separate protocol, **TouchLink v1** (TCP 47100, Bonjour `_touchlink._tcp`, little-endian, 20-byte header).
+- The phone sends up to 10 contacts as `TOUCH_FRAME`s (coordinates 0–65535, ≤120 Hz, 100 ms STATIONARY keep-alive).
+- The Mac recognizes gestures and injects CGEvents:
+  | Input | Pointer mode (default) | Scroll mode |
+  |---|---|---|
+  | Tap / repeated taps | Click / double / triple click | Same |
+  | One-finger drag | Left drag | Continuous scroll |
+  | Long press (500 ms) | Right click (drag allowed) | Same |
+  | Two-finger pan | Continuous scroll | Same |
+- **Pairing**: over Wi-Fi, enter the 6-digit code shown in the Mac menu bar on the phone once (3 wrong tries locks that address for 1 minute). Only LAN peers are accepted.
+- **USB**: TouchLink messages travel inside the USB accessory link (`0x04`/`0x84`), so no adb is needed. A physical connection skips pairing.
+- Not implemented yet: per-device keys + PSK TLS, pinch/rotate (no public CGEvent API), web/iOS clients.
+
 ## Network: "phone on mobile data, Mac on Wi-Fi"?
 Mobile data and home Wi-Fi are different networks, and the Mac sits behind the router's NAT. The phone can't reach it directly without a separate relay server, and a relay would add too much delay for live screen sharing. So the app uses **automatic discovery on the same network**.
 
@@ -71,6 +85,8 @@ Download from [Releases](../../releases):
 | A→M | 0x01 CONFIG | i32 w, i32 h, i32 dpi, utf8 name |
 | A→M | 0x02 TOUCH | u8 action(0 down/1 move/2 up), f32 x, f32 y (0..1) |
 | A→M | 0x03 KEYFRAME_REQ | – |
-| M→A | 0x81 VIDEO_CONFIG | i32 w, i32 h |
+| A→M | 0x04 TOUCHLINK | raw TouchLink v1 message (USB tunnel) |
+| M→A | 0x81 VIDEO_CONFIG | i32 w, i32 h, u32 displayID |
 | M→A | 0x82 FRAME | u8 flags(bit0 key), i64 ptsUs, H.264 Annex-B |
 | M→A | 0x83 STATUS | utf8 |
+| M→A | 0x84 TOUCHLINK | raw TouchLink v1 message (USB tunnel) |

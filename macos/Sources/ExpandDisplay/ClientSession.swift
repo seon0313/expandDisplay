@@ -9,6 +9,8 @@ final class ClientSession {
     var onConfig: ((_ width: Int, _ height: Int, _ dpi: Int, _ name: String) -> Void)?
     var onTouch: ((_ action: UInt8, _ x: Float, _ y: Float) -> Void)?
     var onKeyframeRequest: (() -> Void)?
+    /// Tunnelled TouchLink bytes. Called on `queue` (not main) for latency.
+    var onTouchLink: ((Data) -> Void)?
     var onClose: (() -> Void)?
 
     private var buffer: [UInt8] = []
@@ -45,10 +47,11 @@ final class ClientSession {
         transport.send(packet) { completion?() }
     }
 
-    func sendVideoConfig(width: Int, height: Int) {
+    func sendVideoConfig(width: Int, height: Int, displayID: UInt32) {
         var p = Data()
         p.appendBE(Int32(width))
         p.appendBE(Int32(height))
+        p.appendBE(displayID)
         send(type: Proto.videoConfig, payload: p)
     }
 
@@ -83,6 +86,8 @@ final class ClientSession {
         case Proto.touch:
             guard let action = r.u8(), let x = r.f32(), let y = r.f32() else { return }
             DispatchQueue.main.async { self.onTouch?(action, x, y) }
+        case Proto.touchLinkTunnel:
+            onTouchLink?(Data(payload))
         case Proto.keyframeRequest:
             DispatchQueue.main.async { self.onKeyframeRequest?() }
         default:

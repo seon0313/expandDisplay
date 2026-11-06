@@ -9,11 +9,13 @@ enum Proto {
     static let config: UInt8 = 0x01        // i32 width, i32 height, i32 dpi, utf8 deviceName
     static let touch: UInt8 = 0x02         // u8 action(0 down,1 move,2 up), f32 x, f32 y (normalized 0..1)
     static let keyframeRequest: UInt8 = 0x03
+    static let touchLinkTunnel: UInt8 = 0x04   // raw TouchLink v1 message (used over USB)
 
     // Server -> Client
-    static let videoConfig: UInt8 = 0x81   // i32 width, i32 height
+    static let videoConfig: UInt8 = 0x81   // i32 width, i32 height, u32 displayID (BE)
     static let frame: UInt8 = 0x82         // u8 flags(bit0 = keyframe), i64 ptsUs, Annex-B H.264
     static let status: UInt8 = 0x83        // utf8 message
+    static let touchLinkTunnelOut: UInt8 = 0x84
 }
 
 extension Data {

@@ -27,6 +27,10 @@ class StreamClient(
         fun onDisconnected(error: String?)
         fun onStatus(message: String)
         fun onFirstFrame()
+        /** The Mac's CGDirectDisplayID of the virtual display being streamed. */
+        fun onVideoDisplay(displayId: Long) {}
+        /** Tunnelled TouchLink bytes (reader thread). */
+        fun onTouchLink(data: ByteArray) {}
     }
 
     @Volatile private var link: Link? = null
@@ -117,6 +121,8 @@ class StreamClient(
         send(Proto.TOUCH, p)
     }
 
+    fun sendTouchLink(bytes: ByteArray) = send(Proto.TOUCHLINK_TUNNEL, bytes)
+
     // ---- Internals ----
 
     private fun sendConfigLocked() {
@@ -174,6 +180,7 @@ class StreamClient(
                     val bb = ByteBuffer.wrap(buf, 0, len)
                     val w = bb.int
                     val h = bb.int
+                    if (len >= 12) callbacks.onVideoDisplay(bb.int.toLong() and 0xFFFFFFFFL)
                     synchronized(lock) {
                         if (w == videoW && h == videoH && decoder?.broken == false) {
                             // Same size (e.g. bitrate/fps change on the Mac): keep the decoder and
@@ -188,6 +195,7 @@ class StreamClient(
                 }
                 Proto.FRAME -> handleFrame(buf, len)
                 Proto.STATUS -> callbacks.onStatus(String(buf, 0, len, Charsets.UTF_8))
+                Proto.TOUCHLINK_TUNNEL_OUT -> callbacks.onTouchLink(buf.copyOf(len))
             }
         }
     }

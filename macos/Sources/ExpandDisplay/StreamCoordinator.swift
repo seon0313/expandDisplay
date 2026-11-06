@@ -15,8 +15,11 @@ final class StreamCoordinator: ObservableObject {
     @Published private(set) var streaming = false
     @Published private(set) var lastError: String?
     @Published private(set) var hasScreenPermission = CGPreflightScreenCaptureAccess()
-    @Published private(set) var hasAccessibilityPermission = AXIsProcessTrusted()
+    @Published private(set) var hasAccessibilityPermission = CGPreflightPostEventAccess() || AXIsProcessTrusted()
     @Published private(set) var usbStatus = "USB: 시작 중…"
+    @Published private(set) var touchLinkStatus = "TouchLink: 시작 중…"
+    @Published private(set) var touchLinkClients: [String] = []
+    @Published private(set) var pairingCode = TouchLinkPairing.shared.code
     @Published var usbEnabled: Bool = UserDefaults.standard.object(forKey: "usbEnabled") as? Bool ?? true {
         didSet { UserDefaults.standard.set(usbEnabled, forKey: "usbEnabled"); usb.enabled = usbEnabled }
     }
@@ -37,6 +40,8 @@ final class StreamCoordinator: ObservableObject {
 
     private let server = Server()
     private let usb = EDAccessoryManager()
+    private let touchLinkServer = TouchLinkServer()
+    private var displaysChangedWork: DispatchWorkItem?
     /// Connections that haven't sent CONFIG yet. A connection becomes the active session when it
     /// does, so a USB link waiting for the phone app doesn't kick out a working Wi-Fi session.
     private var pending: [ClientSession] = []
@@ -57,6 +62,9 @@ final class StreamCoordinator: ObservableObject {
         usb.onAccessory = { [weak self] conn in self?.accept(USBTransport(conn)) }
         usb.onStatus = { [weak self] s in self?.usbStatus = s }
         usb.start()
+        touchLinkServer.onStatus = { [weak self] s in self?.touchLinkStatus = s }
+        TouchLinkHub.shared.onChange = { [weak self] names in self?.touchLinkClients = names }
+        touchLinkServer.start()
         server.onStateChange = { [weak self] s in self?.serverStatus = s }
         server.start()
         permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -68,7 +76,10 @@ final class StreamCoordinator: ObservableObject {
         CGDisplayRegisterReconfigurationCallback({ displayID, flags, userInfo in
             guard let userInfo, !flags.contains(.beginConfigurationFlag) else { return }
             let me = Unmanaged<StreamCoordinator>.fromOpaque(userInfo).takeUnretainedValue()
-            DispatchQueue.main.async { me.displayReconfigured(displayID) }
+            DispatchQueue.main.async {
+                me.displayReconfigured(displayID)
+                me.scheduleDisplayListBroadcast()
+            }
         }, Unmanaged.passUnretained(self).toOpaque())
     }
 
@@ -77,7 +88,7 @@ final class StreamCoordinator: ObservableObject {
     private var lastProbe = Date.distantPast
 
     func refreshPermissions() {
-        let ax = AXIsProcessTrusted()
+        let ax = CGPreflightPostEventAccess() || AXIsProcessTrusted()
         if ax != hasAccessibilityPermission { hasAccessibilityPermission = ax }
 
         // CGPreflightScreenCaptureAccess() is cached for the life of the process, so after the user
@@ -126,8 +137,11 @@ final class StreamCoordinator: ObservableObject {
     }
 
     func requestAccessibilityPermission() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(opts)
+        // §7: posting CGEvents needs the "post event" (Accessibility) grant.
+        if !CGRequestPostEventAccess() {
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(opts)
+        }
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
@@ -137,8 +151,30 @@ final class StreamCoordinator: ObservableObject {
         session?.close()
     }
 
+    func regeneratePairingCode() {
+        pairingCode = TouchLinkPairing.shared.regenerate()
+    }
+
+    func disconnectTouchLink() {
+        TouchLinkHub.shared.disconnectAll()
+    }
+
+    /// §5: resend DISPLAY_LIST when the display configuration changes.
+    fileprivate func scheduleDisplayListBroadcast() {
+        displaysChangedWork?.cancel()
+        let w = DispatchWorkItem { TouchLinkHub.shared.displaysChanged() }
+        displaysChangedWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: w)
+    }
+
     private func accept(_ transport: Transport) {
         let s = ClientSession(transport: transport)
+        // TouchLink tunnelled inside this link (the Android app uses it over USB).
+        // A physical USB link is trusted; anything else must pair like a normal TouchLink client.
+        let tl = TouchLinkSession(peer: transport.displayName, trusted: transport is USBTransport,
+                                  send: { [weak s] data in s?.send(type: Proto.touchLinkTunnelOut, payload: data) },
+                                  close: {})
+        s.onTouchLink = { data in tl.receive(data) }
         s.onConfig = { [weak self, weak s] w, h, dpi, name in
             guard let self, let s else { return }
             if s !== self.session { self.promote(s) }
@@ -156,6 +192,7 @@ final class StreamCoordinator: ObservableObject {
             self.pipeline?.requestKeyframe()
         }
         s.onClose = { [weak self, weak s] in
+            tl.transportClosed()
             guard let self, let s else { return }
             self.pending.removeAll { $0 === s }
             if s.isUSB { self.usbStatus = "USB: 케이블 대기 중" }
@@ -245,7 +282,7 @@ final class StreamCoordinator: ObservableObject {
             }
             self.pipeline = p
             self.resolutionText = "\(pw)×\(ph)" + (self.hiDPI ? " (HiDPI)" : "") + " @\(self.fps)Hz"
-            session.sendVideoConfig(width: pw, height: ph)
+            session.sendVideoConfig(width: pw, height: ph, displayID: id)
             Task {
                 do {
                     try await p.start()

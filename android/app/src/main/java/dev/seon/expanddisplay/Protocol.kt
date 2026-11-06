@@ -9,11 +9,13 @@ object Proto {
     const val CONFIG = 0x01           // i32 w, i32 h, i32 dpi, utf8 name
     const val TOUCH = 0x02            // u8 action, f32 x, f32 y (0..1)
     const val KEYFRAME_REQUEST = 0x03
+    const val TOUCHLINK_TUNNEL = 0x04 // raw TouchLink v1 message (used over USB)
 
     // Mac -> Phone
-    const val VIDEO_CONFIG = 0x81     // i32 w, i32 h
+    const val VIDEO_CONFIG = 0x81     // i32 w, i32 h, u32 displayID
     const val FRAME = 0x82            // u8 flags, i64 ptsUs, Annex-B H.264
     const val STATUS = 0x83           // utf8
+    const val TOUCHLINK_TUNNEL_OUT = 0x84
 
     const val TOUCH_DOWN = 0
     const val TOUCH_MOVE = 1

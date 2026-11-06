@@ -45,6 +45,25 @@ struct MenuContentView: View {
 
             Divider()
 
+            VStack(alignment: .leading, spacing: 4) {
+                Label(c.touchLinkStatus, systemImage: "hand.tap")
+                HStack {
+                    Text("페어링 코드").foregroundStyle(.secondary)
+                    Text(c.pairingCode).font(.system(.title3, design: .monospaced)).bold().textSelection(.enabled)
+                    Spacer()
+                    Button("재발급") { c.regeneratePairingCode() }
+                }
+                ForEach(c.touchLinkClients, id: \.self) { name in
+                    Label(name, systemImage: "hand.point.up.left").foregroundStyle(.green)
+                }
+                if !c.touchLinkClients.isEmpty {
+                    Button("TouchLink 연결 끊기") { c.disconnectTouchLink() }
+                }
+            }
+            .font(.callout)
+
+            Divider()
+
             Toggle("USB 케이블 연결 사용", isOn: $c.usbEnabled)
             Toggle("HiDPI (Retina) 모드", isOn: $c.hiDPI)
             Picker("비트레이트", selection: $c.bitrateMbps) {

@@ -21,7 +21,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -59,6 +61,8 @@ fun AppScreen(controller: AppController) {
 fun StreamScreen(controller: AppController) {
     val hasVideo by controller.hasVideo.collectAsState()
     val status by controller.status.collectAsState()
+    val pairingNeeded by controller.pairingNeeded.collectAsState()
+    val pairingError by controller.pairingError.collectAsState()
 
     BackHandler { controller.disconnect(userInitiated = true) }
 
@@ -83,6 +87,13 @@ fun StreamScreen(controller: AppController) {
                 }
             },
         )
+        if (pairingNeeded) {
+            PairingDialog(
+                error = pairingError,
+                onSubmit = { controller.submitPairingCode(it) },
+                onDismiss = { controller.dismissPairing() },
+            )
+        }
         if (!hasVideo) {
             Column(
                 Modifier.align(Alignment.Center).padding(24.dp),
@@ -103,6 +114,7 @@ fun ConnectScreen(controller: AppController, state: ConnState) {
     val hosts by controller.discovery.hosts.collectAsState()
     val auto by controller.autoConnect.collectAsState()
     val usb by controller.usbAttached.collectAsState()
+    val scrollMode by controller.scrollMode.collectAsState()
     var manualIp by rememberSaveable { mutableStateOf("") }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -137,6 +149,18 @@ fun ConnectScreen(controller: AppController, state: ConnState) {
                             Text("Mac이 케이블로 연결되어 있습니다", style = MaterialTheme.typography.bodySmall)
                         }
                     }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("한 손가락 드래그 = 스크롤")
+                        Text(
+                            "끄면 드래그 = 마우스 드래그 (두 손가락은 항상 스크롤)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = scrollMode, onCheckedChange = { controller.setScrollMode(it) })
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -197,4 +221,30 @@ private fun parseHostPort(s: String): Pair<String, Int> {
         if (port != null) return s.substring(0, idx) to port
     }
     return s to Proto.DEFAULT_PORT
+}
+
+@Composable
+private fun PairingDialog(error: String?, onSubmit: (String) -> Unit, onDismiss: () -> Unit) {
+    var code by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("터치 입력 페어링") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Mac 메뉴바의 ExpandDisplay에 표시된 6자리 페어링 코드를 입력하세요. 한 번만 입력하면 됩니다.")
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = { v -> code = v.filter { it.isDigit() }.take(6) },
+                    label = { Text("페어링 코드") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = code.length == 6, onClick = { onSubmit(code) }) { Text("확인") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("나중에") } },
+    )
 }

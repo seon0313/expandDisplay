@@ -8,6 +8,11 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
 import androidx.core.content.ContextCompat
+import dev.seon.expanddisplay.touchlink.TL
+import dev.seon.expanddisplay.touchlink.TLDisplay
+import dev.seon.expanddisplay.touchlink.TouchFrameSender
+import dev.seon.expanddisplay.touchlink.TouchLinkClient
+import dev.seon.expanddisplay.touchlink.TouchLinkTcp
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -48,6 +53,22 @@ class AppController(private val context: Context) {
     val autoConnect: StateFlow<Boolean> = _autoConnect
 
     private var client: StreamClient? = null
+
+    // ---- TouchLink (touch input) ----
+    private val prefs = context.getSharedPreferences("touchlink", Context.MODE_PRIVATE)
+    @Volatile private var touchLink: TouchLinkClient? = null
+    private var touchLinkTcp: TouchLinkTcp? = null
+    private var targetDisplayId: Long? = null
+    private val frameSender = TouchFrameSender { bytes -> touchLink?.sendFrame(bytes) }
+    private val _pairingNeeded = MutableStateFlow(false)
+    val pairingNeeded: StateFlow<Boolean> = _pairingNeeded
+    private val _pairingError = MutableStateFlow<String?>(null)
+    val pairingError: StateFlow<String?> = _pairingError
+    private val _touchReady = MutableStateFlow(false)
+    val touchReady: StateFlow<Boolean> = _touchReady
+    private val _scrollMode = MutableStateFlow(prefs.getBoolean("scrollMode", false))
+    /** TouchLink mode 1: one-finger drag scrolls (system-compatible). */
+    val scrollMode: StateFlow<Boolean> = _scrollMode
     private val usbManager = context.getSystemService(UsbManager::class.java)
     /** The Mac's USB accessory while the cable is plugged in (USB takes priority over Wi-Fi). */
     private var usbAccessory: UsbAccessory? = null
@@ -167,6 +188,7 @@ class AppController(private val context: Context) {
         usbAccessory = null
         _usbAttached.value = false
         if (client?.host?.address == USB_ADDRESS) {
+            stopTouchLink()
             val c = client
             client = null
             c?.close()
@@ -193,6 +215,7 @@ class AppController(private val context: Context) {
                     if (client === c) {
                         runCatching { wifiLock.acquire() }
                         _state.value = ConnState.Connected(host)
+                        startTouchLink(host, c)
                         surface?.let { c.attachSurface(it, surfaceW, surfaceH) }
                     }
                 }
@@ -202,6 +225,7 @@ class AppController(private val context: Context) {
                 main.post {
                     if (client === c) {
                         client = null
+                        stopTouchLink()
                         if (host.address == USB_ADDRESS) {
                             // e.g. the Mac app restarted: the cable is still in, so reopen the accessory.
                             usbAccessory = null
@@ -221,6 +245,21 @@ class AppController(private val context: Context) {
             override fun onFirstFrame() {
                 main.post { if (client === c) _hasVideo.value = true }
             }
+
+            override fun onVideoDisplay(displayId: Long) {
+                main.post {
+                    if (client === c) {
+                        targetDisplayId = displayId
+                        touchLink?.setTarget(displayId)
+                        updateActiveArea()
+                    }
+                }
+            }
+
+            override fun onTouchLink(data: ByteArray) {
+                // Tunnelled replies (USB). Never let a bad message kill the video link.
+                if (client === c) runCatching { touchLink?.feed(data) }
+            }
         })
         client = c
         c.connect()
@@ -228,6 +267,7 @@ class AppController(private val context: Context) {
 
     fun disconnect(userInitiated: Boolean) {
         if (userInitiated) _autoConnect.value = false
+        stopTouchLink()
         val c = client
         client = null
         c?.close()
@@ -246,6 +286,7 @@ class AppController(private val context: Context) {
         surface = s
         surfaceW = width
         surfaceH = height
+        updateActiveArea()
         if (_state.value is ConnState.Connected) client?.attachSurface(s, width, height)
     }
 
@@ -255,17 +296,118 @@ class AppController(private val context: Context) {
     }
 
     fun onTouch(e: MotionEvent, viewW: Int, viewH: Int) {
-        val c = client ?: return
-        if (viewW <= 0 || viewH <= 0) return
-        val action = when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> Proto.TOUCH_DOWN
-            MotionEvent.ACTION_MOVE -> Proto.TOUCH_MOVE
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> Proto.TOUCH_UP
-            else -> return // ignore extra fingers
+        if (viewW != surfaceW || viewH != surfaceH) {
+            surfaceW = viewW
+            surfaceH = viewH
+            updateActiveArea()
         }
-        val x = (e.getX(0) / viewW).coerceIn(0f, 1f)
-        val y = (e.getY(0) / viewH).coerceIn(0f, 1f)
-        c.sendTouch(action, x, y)
+        frameSender.onTouch(e)
+    }
+
+    /** §4 rule 4: app going to background cancels all contacts. */
+    fun onPause() {
+        frameSender.cancelAll()
+    }
+
+    // ---- TouchLink ----
+
+    private fun pairKey(host: HostInfo) = "code_${host.name}"
+
+    private fun startTouchLink(host: HostInfo, c: StreamClient) {
+        stopTouchLink()
+        _pairingError.value = null
+        val listener = object : TouchLinkClient.Listener {
+            override fun onHelloAck(result: Int, codeUsed: Int) {
+                main.post {
+                    if (client !== c) return@post
+                    when (result) {
+                        TL.RESULT_OK -> {
+                            if (host.address != USB_ADDRESS) prefs.edit().putInt(pairKey(host), codeUsed).apply()
+                            _pairingNeeded.value = false
+                            _pairingError.value = null
+                            _touchReady.value = true
+                            touchLink?.let { tl ->
+                                frameSender.rateHz = tl.maxRateHz
+                                tl.setConfig(if (_scrollMode.value) 1 else 0)
+                            }
+                        }
+                        TL.RESULT_PAIRING_FAILED -> {
+                            _touchReady.value = false
+                            _pairingNeeded.value = true
+                            _pairingError.value = if (codeUsed != 0) {
+                                "코드가 맞지 않습니다 (3회 틀리면 1분간 잠깁니다)"
+                            } else null
+                        }
+                        else -> _status.value = "TouchLink 버전이 맞지 않습니다 — 앱을 업데이트하세요"
+                    }
+                }
+            }
+
+            override fun onDisplays(displays: List<TLDisplay>) {
+                main.post { if (client === c) updateActiveArea() }
+            }
+
+            override fun onBye() {
+                main.post { if (client === c) _touchReady.value = false }
+            }
+        }
+
+        if (host.address == USB_ADDRESS) {
+            // Over USB, TouchLink rides inside the accessory link (physical connection = trusted).
+            val tl = TouchLinkClient({ bytes -> c.sendTouchLink(bytes) }, listener)
+            touchLink = tl
+            targetDisplayId?.let { tl.setTarget(it) }
+            tl.hello(0, surfaceW, surfaceH, deviceName)
+        } else {
+            lateinit var tcp: TouchLinkTcp
+            lateinit var tl: TouchLinkClient
+            tcp = TouchLinkTcp(
+                host.address, TL.PORT,
+                onConnected = { tl.hello(prefs.getInt(pairKey(host), 0), surfaceW, surfaceH, deviceName) },
+                onBytes = { buf, n -> runCatching { tl.feed(buf, 0, n) }.onFailure { tcp.close() } },
+                onClosed = { main.post { if (touchLinkTcp === tcp) _touchReady.value = false } },
+            )
+            tl = TouchLinkClient({ bytes -> tcp.send(bytes) }, listener)
+            touchLink = tl
+            touchLinkTcp = tcp
+            targetDisplayId?.let { tl.setTarget(it) }
+            tcp.start()
+        }
+    }
+
+    private fun stopTouchLink() {
+        frameSender.cancelAll()
+        touchLink?.bye()
+        touchLink = null
+        touchLinkTcp?.close()
+        touchLinkTcp = null
+        targetDisplayId = null
+        _touchReady.value = false
+        _pairingNeeded.value = false
+    }
+
+    fun submitPairingCode(code: String) {
+        val n = code.trim().toIntOrNull() ?: run {
+            _pairingError.value = "숫자 6자리를 입력하세요"
+            return
+        }
+        touchLink?.hello(n, surfaceW, surfaceH, deviceName)
+    }
+
+    fun dismissPairing() {
+        _pairingNeeded.value = false
+    }
+
+    fun setScrollMode(enabled: Boolean) {
+        _scrollMode.value = enabled
+        prefs.edit().putBoolean("scrollMode", enabled).apply()
+        touchLink?.setConfig(if (enabled) 1 else 0)
+    }
+
+    private fun updateActiveArea() {
+        val size = touchLink?.displaySize()
+        frameSender.setActiveArea(surfaceW, surfaceH, size?.first, size?.second,
+            context.resources.displayMetrics.xdpi)
     }
 
     companion object {

@@ -50,6 +50,11 @@ class MainActivity : ComponentActivity() {
         controller.checkUsb()
     }
 
+    override fun onPause() {
+        controller.onPause()
+        super.onPause()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) hideSystemBars()
