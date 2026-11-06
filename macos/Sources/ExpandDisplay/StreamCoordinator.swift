@@ -20,7 +20,11 @@ final class StreamCoordinator: ObservableObject {
         didSet { UserDefaults.standard.set(hiDPI, forKey: "hiDPI"); if oldValue != hiDPI { rebuild() } }
     }
     @Published var bitrateMbps: Int = UserDefaults.standard.object(forKey: "bitrate") as? Int ?? 30 {
-        didSet { UserDefaults.standard.set(bitrateMbps, forKey: "bitrate"); if oldValue != bitrateMbps { rebuild() } }
+        didSet {
+            UserDefaults.standard.set(bitrateMbps, forKey: "bitrate")
+            // Applied live to the running encoder — no display/pipeline restart (that caused cropping).
+            if oldValue != bitrateMbps { pipeline?.updateBitrate(bitrateMbps * 1_000_000) }
+        }
     }
     @Published var fps: Int = UserDefaults.standard.object(forKey: "fps") as? Int ?? 60 {
         didSet { UserDefaults.standard.set(fps, forKey: "fps"); if oldValue != fps { rebuild() } }
@@ -35,6 +39,8 @@ final class StreamCoordinator: ObservableObject {
     private var generation = 0
     private var teardown: DispatchWorkItem?
     private var permissionTimer: Timer?
+    private var appliedMode: (w: Int, h: Int, hiDPI: Bool, refresh: Int)?
+    private var restartWork: DispatchWorkItem?
 
     init() {
         server.onConnection = { [weak self] conn in self?.accept(conn) }
@@ -46,6 +52,11 @@ final class StreamCoordinator: ObservableObject {
         if !CGPreflightScreenCaptureAccess() {
             CGRequestScreenCaptureAccess()
         }
+        CGDisplayRegisterReconfigurationCallback({ displayID, flags, userInfo in
+            guard let userInfo, !flags.contains(.beginConfigurationFlag) else { return }
+            let me = Unmanaged<StreamCoordinator>.fromOpaque(userInfo).takeUnretainedValue()
+            DispatchQueue.main.async { me.displayReconfigured(displayID) }
+        }, Unmanaged.passUnretained(self).toOpaque())
     }
 
     // MARK: Permissions
@@ -127,6 +138,7 @@ final class StreamCoordinator: ObservableObject {
 
     // MARK: Display + pipeline
 
+    /// Full rebuild: (re)apply the virtual display mode, then restart capture once the mode is stable.
     private func rebuild() {
         guard let req = request, let session else { return }
         stopPipeline()
@@ -139,26 +151,41 @@ final class StreamCoordinator: ObservableObject {
             return
         }
 
-        guard let display = ensureDisplay(for: req) else {
+        var modeChanged = false
+        guard ensureDisplay(for: req, modeChanged: &modeChanged) != nil else {
             lastError = "가상 디스플레이를 만들 수 없습니다"
             session.sendStatus("Mac에서 가상 디스플레이를 만들지 못했습니다")
             return
         }
+        startPipeline(settle: modeChanged)
+    }
 
-        generation += 1
+    /// Restart only capture/encode on the existing display (no mode change).
+    private func restartPipeline() {
+        guard display != nil, request != nil, session != nil else { return }
+        startPipeline(settle: false)
+    }
+
+    private func startPipeline(settle: Bool) {
+        guard let req = request, let display else { return }
+        stopPipeline()
         let gen = generation
         let id = display.displayID
-        let expectW = req.width, expectH = req.height
 
-        waitForMode(displayID: id, width: expectW, height: expectH, attempts: 30) { [weak self] in
+        // After a mode change macOS reconfigures the display asynchronously. The pixel size can
+        // read "correct" before the reconfiguration lands, so require it to be stable for a while.
+        waitForStableMode(displayID: id, width: req.width, height: req.height,
+                          stableNeeded: settle ? 4 : 1, attempts: 50) { [weak self] in
             guard let self, gen == self.generation, let session = self.session else { return }
-            let (pw, ph) = Self.pixelSize(of: id, fallback: (expectW, expectH))
+            let (pw, ph) = Self.pixelSize(of: id, fallback: (req.width, req.height))
             let p = CapturePipeline(displayID: id, width: pw, height: ph, fps: self.fps,
                                     bitrate: self.bitrateMbps * 1_000_000, session: session)
             p.onError = { [weak self, weak p] err in
                 guard let self, let p, p === self.pipeline else { return }
+                // Stream died (usually a display reconfiguration) — restart capture.
                 self.lastError = err.localizedDescription
                 self.streaming = false
+                self.scheduleRestart(after: 0.5)
             }
             self.pipeline = p
             self.resolutionText = "\(pw)×\(ph)" + (self.hiDPI ? " (HiDPI)" : "") + " @\(self.fps)Hz"
@@ -181,19 +208,45 @@ final class StreamCoordinator: ObservableObject {
         }
     }
 
-    private func ensureDisplay(for req: (width: Int, height: Int, dpi: Int, name: String)) -> EDVirtualDisplay? {
+    /// Called for any display reconfiguration. If our display's pixel size no longer matches what
+    /// we're capturing (e.g. the user changed it in System Settings), restart capture to match.
+    fileprivate func displayReconfigured(_ id: CGDirectDisplayID) {
+        guard let d = display, d.displayID == id, let p = pipeline else { return }
+        let (pw, ph) = Self.pixelSize(of: id, fallback: (p.width, p.height))
+        if pw != p.width || ph != p.height {
+            scheduleRestart(after: 0.3)
+        }
+    }
+
+    private func scheduleRestart(after delay: TimeInterval) {
+        restartWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.restartPipeline() }
+        restartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func ensureDisplay(for req: (width: Int, height: Int, dpi: Int, name: String),
+                               modeChanged: inout Bool) -> EDVirtualDisplay? {
         let modeW = hiDPI ? req.width / 2 : req.width
         let modeH = hiDPI ? req.height / 2 : req.height
-        let refresh = Double(fps)
+        let wanted = (w: modeW, h: modeH, hiDPI: hiDPI, refresh: fps)
 
         if let d = display, d.maxPixelsWide >= UInt32(req.width), d.maxPixelsHigh >= UInt32(req.height) {
-            if d.applyMode(width: UInt32(modeW), height: UInt32(modeH), refreshRate: refresh, hiDPI: hiDPI) {
+            // Re-applying an identical mode makes macOS reconfigure the display for nothing.
+            if let m = appliedMode, m == wanted {
+                modeChanged = false
+                return d
+            }
+            if d.applyMode(width: UInt32(modeW), height: UInt32(modeH), refreshRate: Double(fps), hiDPI: hiDPI) {
+                appliedMode = wanted
+                modeChanged = true
                 return d
             }
         }
 
         // (Re)create. Allow both orientations without recreating (folded/unfolded, rotation).
         display = nil
+        appliedMode = nil
         let side = UInt32(max(req.width, req.height))
         let dpi = Double(max(req.dpi, 100))
         let mm = CGSize(width: Double(req.width) / dpi * 25.4, height: Double(req.height) / dpi * 25.4)
@@ -201,22 +254,28 @@ final class StreamCoordinator: ObservableObject {
                                        maxPixelsHigh: side, sizeInMillimeters: mm, serial: 0xED0001) else {
             return nil
         }
-        guard d.applyMode(width: UInt32(modeW), height: UInt32(modeH), refreshRate: refresh, hiDPI: hiDPI) else {
+        guard d.applyMode(width: UInt32(modeW), height: UInt32(modeH), refreshRate: Double(fps), hiDPI: hiDPI) else {
             return nil
         }
         display = d
+        appliedMode = wanted
+        modeChanged = true
         return d
     }
 
-    private func waitForMode(displayID: CGDirectDisplayID, width: Int, height: Int, attempts: Int,
-                             then: @escaping () -> Void) {
+    private func waitForStableMode(displayID: CGDirectDisplayID, width: Int, height: Int,
+                                   stableNeeded: Int, attempts: Int, stable: Int = 0,
+                                   then: @escaping () -> Void) {
         let (pw, ph) = Self.pixelSize(of: displayID, fallback: (0, 0))
-        if (pw == width && ph == height) || attempts <= 0 {
+        let nowStable = (pw == width && ph == height) ? stable + 1 : 0
+        if nowStable >= stableNeeded || attempts <= 0 {
             then()
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.waitForMode(displayID: displayID, width: width, height: height, attempts: attempts - 1, then: then)
+            self?.waitForStableMode(displayID: displayID, width: width, height: height,
+                                    stableNeeded: stableNeeded, attempts: attempts - 1,
+                                    stable: nowStable, then: then)
         }
     }
 
@@ -228,6 +287,8 @@ final class StreamCoordinator: ObservableObject {
     }
 
     private func stopPipeline() {
+        restartWork?.cancel()
+        restartWork = nil
         generation += 1
         pipeline?.stop()
         pipeline = nil
@@ -239,6 +300,7 @@ final class StreamCoordinator: ObservableObject {
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.session == nil else { return }
             self.display = nil
+            self.appliedMode = nil
             self.request = nil
             self.resolutionText = nil
         }

@@ -179,9 +179,15 @@ class StreamClient(
                     val w = bb.int
                     val h = bb.int
                     synchronized(lock) {
-                        videoW = w
-                        videoH = h
-                        recreateDecoderLocked(askForKeyframe = false)
+                        if (w == videoW && h == videoH && decoder?.broken == false) {
+                            // Same size (e.g. bitrate/fps change on the Mac): keep the decoder and
+                            // just resync on the next keyframe — no black flash.
+                            waitingForKeyframe = true
+                        } else {
+                            videoW = w
+                            videoH = h
+                            recreateDecoderLocked(askForKeyframe = false)
+                        }
                     }
                 }
                 Proto.FRAME -> handleFrame(buf, len)

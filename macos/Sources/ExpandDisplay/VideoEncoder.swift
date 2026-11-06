@@ -42,12 +42,12 @@ final class VideoEncoder {
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue!)
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse!)
         set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
-        set(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
-        // Cap bursts at ~1.5x the average over one second.
-        set(kVTCompressionPropertyKey_DataRateLimits, [bitrate * 3 / 2 / 8, 1] as CFArray)
+        applyBitrate(session, bitrate)
         set(kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber)
-        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 5) as CFNumber)
-        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 5 as CFNumber)
+        // TCP is lossless, so periodic keyframes are only a safety net. Keyframes are 5-10x larger
+        // than P-frames and cause visible stutter, so keep them rare; the phone asks for one when needed.
+        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 60) as CFNumber)
+        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 60 as CFNumber)
         set(kVTCompressionPropertyKey_MaxFrameDelayCount, 0 as CFNumber)
         if #available(macOS 13.0, *) {
             set(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue!)
@@ -56,6 +56,19 @@ final class VideoEncoder {
     }
 
     deinit { invalidate() }
+
+    /// Change bitrate on the fly, without recreating the session.
+    func setBitrate(_ bitrate: Int) {
+        guard let session else { return }
+        applyBitrate(session, bitrate)
+    }
+
+    private func applyBitrate(_ session: VTCompressionSession, _ bitrate: Int) {
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
+        // Cap bursts at ~1.5x the average over one second.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
+                             value: [bitrate * 3 / 2 / 8, 1] as CFArray)
+    }
 
     func invalidate() {
         if let session {

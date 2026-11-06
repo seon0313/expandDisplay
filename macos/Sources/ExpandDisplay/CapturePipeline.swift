@@ -103,6 +103,10 @@ final class CapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    func updateBitrate(_ bitrate: Int) {
+        queue.async { self.encoder?.setBitrate(bitrate) }
+    }
+
     func requestKeyframe() {
         queue.async {
             self.forceKeyframe = true

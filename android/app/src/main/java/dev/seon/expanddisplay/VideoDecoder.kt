@@ -66,8 +66,16 @@ class VideoDecoder(surface: Surface, width: Int, height: Int) {
         val info = MediaCodec.BufferInfo()
         while (running) {
             try {
-                val idx = codec.dequeueOutputBuffer(info, 10_000)
+                var idx = codec.dequeueOutputBuffer(info, 10_000)
                 if (idx >= 0) {
+                    // If several decoded frames piled up (e.g. a Wi-Fi burst), show only the newest:
+                    // skipping stale frames keeps latency from accumulating.
+                    while (true) {
+                        val next = codec.dequeueOutputBuffer(info, 0)
+                        if (next < 0) break
+                        codec.releaseOutputBuffer(idx, false)
+                        idx = next
+                    }
                     // Render immediately; never wait for presentation time.
                     codec.releaseOutputBuffer(idx, true)
                 }

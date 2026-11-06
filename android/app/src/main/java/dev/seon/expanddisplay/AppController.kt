@@ -1,6 +1,7 @@
 package dev.seon.expanddisplay
 
 import android.content.Context
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -44,6 +45,12 @@ class AppController(private val context: Context) {
     private var surfaceW = 0
     private var surfaceH = 0
     private var autoJob: Job? = null
+
+    // Wi-Fi power saving adds 50-200 ms latency spikes; the low-latency lock disables it while streaming.
+    private val wifiLock: WifiManager.WifiLock =
+        context.getSystemService(WifiManager::class.java).createWifiLock(
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "expanddisplay-stream",
+        ).apply { setReferenceCounted(false) }
 
     private val deviceName: String by lazy {
         Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)
@@ -89,6 +96,7 @@ class AppController(private val context: Context) {
             override fun onConnected() {
                 main.post {
                     if (client === c) {
+                        runCatching { wifiLock.acquire() }
                         _state.value = ConnState.Connected(host)
                         surface?.let { c.attachSurface(it, surfaceW, surfaceH) }
                     }
@@ -99,6 +107,7 @@ class AppController(private val context: Context) {
                 main.post {
                     if (client === c) {
                         client = null
+                        runCatching { wifiLock.release() }
                         _hasVideo.value = false
                         _state.value = ConnState.Disconnected(error ?: "연결이 종료되었습니다")
                     }
@@ -122,6 +131,7 @@ class AppController(private val context: Context) {
         val c = client
         client = null
         c?.close()
+        runCatching { wifiLock.release() }
         _hasVideo.value = false
         _state.value = ConnState.Disconnected()
     }
@@ -129,6 +139,10 @@ class AppController(private val context: Context) {
     // ---- Called from the SurfaceView ----
 
     fun onSurface(s: Surface, width: Int, height: Int) {
+        if (s !== surface && Build.VERSION.SDK_INT >= 30) {
+            // Ask the display to run at a high refresh rate (Fold: 120 Hz) so frames are shown sooner.
+            runCatching { s.setFrameRate(120f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT) }
+        }
         surface = s
         surfaceW = width
         surfaceH = height
